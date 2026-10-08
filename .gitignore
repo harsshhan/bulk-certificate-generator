@@ -1,0 +1,24 @@
+# Virtual environment
+venv/
+
+# Environment variables / secrets
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Pytest
+.pytest_cache/
+
+# Generated certificates
+storage/certificates/
+
+# Local database files (in case we ever use SQLite)
+*.db
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
