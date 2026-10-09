@@ -61,11 +61,11 @@ def test_get_job_status():
     data = response.json()
 
     assert data["job_id"] == job_id
-    assert data["status"] == "PENDING"
+    assert data["status"] == "COMPLETED"
     assert data["total_count"] == 2
-    assert data["successful_count"] == 0
+    assert data["successful_count"] == 2
     assert data["failed_count"] == 0
-    assert data["pending_count"] == 2
+    assert data["pending_count"] == 0
 
 def test_get_nonexistent_job():
     response = client.get("/jobs/999999")
@@ -106,8 +106,10 @@ def test_get_job_certificates():
     first_certificate = data["certificates"][0]
 
     assert first_certificate["recipient_name"] == "Alice Johnson"
-    assert first_certificate["status"] == "PENDING"
-    assert first_certificate["download_url"] is None
+    assert first_certificate["status"] == "SUCCESS"
+    assert first_certificate["download_url"] == (
+        f"/certificates/{first_certificate['certificate_id']}"
+    )
     assert first_certificate["error_message"] is None
 
 

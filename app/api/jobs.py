@@ -1,18 +1,23 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Depends
 from app.schemas.job import (CreateGenerationJobRequest, CreateGenerationJobResponse, JobStatusResponse, JobCertificatesResponse)
 from app.models.certificate import Certificate
 from app.schemas.certificate import CertificateResponse
 from app.models.job import GenerationJob
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.services.certificate_service import run_bulk_job
 
 
 
 router = APIRouter(prefix="/jobs", tags= ["Jobs"])
 
-@router.post("")
-def create_job(request: CreateGenerationJobRequest, db: Session = Depends(get_db), response_model=CreateGenerationJobResponse):
 
+@router.post("", response_model=CreateGenerationJobResponse)
+def create_job(
+    request: CreateGenerationJobRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     job = GenerationJob(
         event_name=request.event_name,
         event_date=request.event_date,
@@ -29,6 +34,8 @@ def create_job(request: CreateGenerationJobRequest, db: Session = Depends(get_db
         db.add(certificate)
     
     db.commit()
+
+    background_tasks.add_task(run_bulk_job, job_id=job.id)
 
     return CreateGenerationJobResponse(job_id=job.id, status=job.status, total_count=len(request.recipients))
 
