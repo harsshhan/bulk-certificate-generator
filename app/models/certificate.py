@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 from sqlalchemy import DateTime, Enum as SQLEnum, ForeignKey, Integer, String, Text
@@ -62,7 +62,7 @@ class Certificate(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow
+        default=lambda: datetime.now(timezone.utc)
     )
 
     completed_at: Mapped[datetime | None] = mapped_column(

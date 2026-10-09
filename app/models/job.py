@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import datetime, date, timezone
 from enum import Enum
 
 from sqlalchemy import Date, DateTime, Enum as SQLEnum, Integer, String
@@ -45,7 +45,7 @@ class GenerationJob(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow
+        default=lambda: datetime.now(timezone.utc)
     )
 
     completed_at: Mapped[datetime | None] = mapped_column(
