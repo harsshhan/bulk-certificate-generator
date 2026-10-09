@@ -112,8 +112,11 @@ def process_bulk_job(job_id: int, db: Session) -> None:
     job.completed_at = datetime.now(timezone.utc)
     db.commit()
 
-def run_bulk_job(job_id: int) -> None:
+def run_bulk_job(job_id: int, session_factory=None) -> None:
     from app.database import SessionLocal
 
-    with SessionLocal() as db:
+    if session_factory is None:
+        session_factory = SessionLocal
+
+    with session_factory() as db:
         process_bulk_job(job_id, db)
