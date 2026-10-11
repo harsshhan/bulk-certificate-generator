@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models.certificate import Certificate, CertificateStatus
 from app.generators.certificate_generator import generate_certificate
 from app.models.job import GenerationJob, JobStatus
+from app.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ def process_certificate(
         certificate.status = CertificateStatus.SUCCESS
         certificate.error_code = None
         certificate.error_message = None
+        certificate.completed_at = datetime.now(timezone.utc)
+
+        db.commit()
 
     except Exception:
         logger.exception(
@@ -48,32 +52,39 @@ def process_certificate(
             certificate.id,
         )
 
-        certificate.status = CertificateStatus.FAILED
-        certificate.error_code = "GENERATION_ERROR"
-        certificate.error_message = "Failed to generate certificate"
-
         output_path.unlink(missing_ok=True)
+        certificate.status = CertificateStatus.PENDING
+        certificate.file_path = None
+        certificate.error_code = "GENERATION_ERROR"
+        certificate.error_message = "Certificate generation attempt failed"
+        certificate.completed_at = None
 
-    finally:
-        certificate.completed_at = datetime.now(timezone.utc)
         db.commit()
 
-from app.models.job import GenerationJob, JobStatus
+        raise
 
 
-def process_bulk_job(job_id: int, db: Session) -> None:
-    job = db.get(GenerationJob, job_id)
+def run_single_certificate(
+    certificate_id: int,
+    session_factory=None,
+) -> None:
+    if session_factory is None:
+        session_factory = SessionLocal
 
-    if job is None:
-        logger.error("Generation job not found: job_id=%s", job_id)
-        return
+    with session_factory() as db:
+        certificate = db.get(Certificate, certificate_id)
 
-    job.status = JobStatus.PROCESSING
-    db.commit()
+        if certificate is None:
+            raise ValueError(
+                f"Certificate {certificate_id} not found"
+            )
 
-    for certificate in job.certificates:
-        if certificate.status != CertificateStatus.PENDING:
-            continue
+        job = db.get(GenerationJob, certificate.job_id)
+
+        if job is None:
+            raise ValueError(
+                f"Generation job not found for certificate {certificate_id}"
+            )
 
         process_certificate(
             certificate_id=certificate.id,
@@ -81,42 +92,3 @@ def process_bulk_job(job_id: int, db: Session) -> None:
             event_name=job.event_name,
             event_date=job.event_date.isoformat(),
         )
-
-    db.refresh(job)
-
-    failed_count = sum(
-        certificate.status == CertificateStatus.FAILED
-        for certificate in job.certificates
-    )
-
-    pending_count = sum(
-        certificate.status in {
-            CertificateStatus.PENDING,
-            CertificateStatus.PROCESSING,
-        }
-        for certificate in job.certificates
-    )
-
-    if pending_count > 0:
-        logger.error(
-            "Job %s still has unfinished certificates",
-            job_id,
-        )
-        return
-
-    if failed_count > 0:
-        job.status = JobStatus.COMPLETED_WITH_ERRORS
-    else:
-        job.status = JobStatus.COMPLETED
-
-    job.completed_at = datetime.now(timezone.utc)
-    db.commit()
-
-def run_bulk_job(job_id: int, session_factory=None) -> None:
-    from app.database import SessionLocal
-
-    if session_factory is None:
-        session_factory = SessionLocal
-
-    with session_factory() as db:
-        process_bulk_job(job_id, db)

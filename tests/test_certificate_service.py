@@ -1,37 +1,40 @@
 from datetime import date
-
-from app.models.certificate import Certificate, CertificateStatus
-from app.models.job import GenerationJob, JobStatus
-
 from unittest.mock import patch
 
+import pytest
+
 from app.database import SessionLocal
+from app.models.certificate import Certificate, CertificateStatus
+from app.models.job import GenerationJob, JobStatus
 from app.services.certificate_service import (
     process_certificate,
-    process_bulk_job,
+    run_single_certificate,
 )
+
 
 def create_test_job(db):
     job = GenerationJob(
-        event_name="Python Workshop",
-        event_date=date(2026, 10, 7),
-        status=JobStatus.PENDING,
+        event_name="Test Event",
+        event_date=date(2026, 10, 11),
+        status=JobStatus.PROCESSING,
     )
     db.add(job)
     db.flush()
 
     certificate = Certificate(
         job_id=job.id,
-        recipient_name="Alice Johnson",
+        recipient_name="Alice",
         recipient_email="alice@example.com",
         status=CertificateStatus.PENDING,
     )
     db.add(certificate)
     db.commit()
+
     db.refresh(job)
     db.refresh(certificate)
 
     return job, certificate
+
 
 def test_process_certificate_success():
     with SessionLocal() as db:
@@ -47,16 +50,18 @@ def test_process_certificate_success():
                 event_date=job.event_date.isoformat(),
             )
 
+            mock_generate.assert_called_once()
+
         db.refresh(certificate)
 
         assert certificate.status == CertificateStatus.SUCCESS
         assert certificate.file_path is not None
+        assert certificate.error_code is None
         assert certificate.error_message is None
         assert certificate.completed_at is not None
 
-        mock_generate.assert_called_once()
 
-def test_process_certificate_failure():
+def test_process_certificate_failure_is_retryable():
     with SessionLocal() as db:
         job, certificate = create_test_job(db)
 
@@ -64,88 +69,55 @@ def test_process_certificate_failure():
             "app.services.certificate_service.generate_certificate",
             side_effect=OSError("Disk write failed"),
         ) as mock_generate:
-            process_certificate(
-                certificate_id=certificate.id,
-                db=db,
-                event_name=job.event_name,
-                event_date=job.event_date.isoformat(),
-            )
+            with pytest.raises(
+                OSError,
+                match="Disk write failed",
+            ):
+                process_certificate(
+                    certificate_id=certificate.id,
+                    db=db,
+                    event_name=job.event_name,
+                    event_date=job.event_date.isoformat(),
+                )
+
+            mock_generate.assert_called_once()
 
         db.refresh(certificate)
 
-        assert certificate.status == CertificateStatus.FAILED
-        assert certificate.error_code == "GENERATION_ERROR"
-        assert certificate.error_message == "Failed to generate certificate"
-        assert certificate.completed_at is not None
+        assert certificate.status == CertificateStatus.PENDING
         assert certificate.file_path is None
+        assert certificate.error_code == "GENERATION_ERROR"
+        assert (
+            certificate.error_message
+            == "Certificate generation attempt failed"
+        )
+        assert certificate.completed_at is None
+
+
+def test_run_single_certificate():
+    with SessionLocal() as db:
+        _, certificate = create_test_job(db)
+        certificate_id = certificate.id
+
+    with patch(
+        "app.services.certificate_service.generate_certificate"
+    ) as mock_generate:
+        run_single_certificate(certificate_id)
 
         mock_generate.assert_called_once()
-    
-def test_bulk_job_completes_when_all_certificates_succeed():
+
     with SessionLocal() as db:
-        job, first_certificate = create_test_job(db)
+        certificate = db.get(Certificate, certificate_id)
 
-        second_certificate = Certificate(
-            job_id=job.id,
-            recipient_name="Bob Smith",
-            recipient_email="bob@example.com",
-            status=CertificateStatus.PENDING,
-        )
-        db.add(second_certificate)
-        db.commit()
-        db.refresh(second_certificate)
+        assert certificate is not None
+        assert certificate.status == CertificateStatus.SUCCESS
+        assert certificate.file_path is not None
+        assert certificate.completed_at is not None
 
-        with patch(
-            "app.services.certificate_service.generate_certificate"
-        ) as mock_generate:
-            process_bulk_job(job.id, db)
 
-        db.refresh(job)
-        db.refresh(first_certificate)
-        db.refresh(second_certificate)
-
-        assert first_certificate.status == CertificateStatus.SUCCESS
-        assert second_certificate.status == CertificateStatus.SUCCESS
-
-        assert job.status == JobStatus.COMPLETED
-        assert job.completed_at is not None
-
-        assert mock_generate.call_count == 2
-        
-def test_bulk_job_continues_when_certificate_fails():
-    with SessionLocal() as db:
-        job, first_certificate = create_test_job(db)
-
-        second_certificate = Certificate(
-            job_id=job.id,
-            recipient_name="Bob Smith",
-            recipient_email="bob@example.com",
-            status=CertificateStatus.PENDING,
-        )
-        db.add(second_certificate)
-        db.commit()
-        db.refresh(second_certificate)
-
-        def generate_with_one_failure(
-            recipient_name,
-            event_name,
-            event_date,
-            output_path,
-        ):
-            if recipient_name == "Alice Johnson":
-                raise OSError("Simulated PDF generation failure")
-
-        with patch(
-            "app.services.certificate_service.generate_certificate",
-            side_effect=generate_with_one_failure,
-        ):
-            process_bulk_job(job.id, db)
-
-        db.refresh(job)
-        db.refresh(first_certificate)
-        db.refresh(second_certificate)
-
-        assert first_certificate.status == CertificateStatus.FAILED
-        assert second_certificate.status == CertificateStatus.SUCCESS
-        assert job.status == JobStatus.COMPLETED_WITH_ERRORS
-        assert job.completed_at is not None
+def test_run_single_certificate_not_found():
+    with pytest.raises(
+        ValueError,
+        match="Certificate 999999 not found",
+    ):
+        run_single_certificate(999999)
