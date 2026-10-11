@@ -5,32 +5,36 @@ from app.database import SessionLocal
 from app.models.job import GenerationJob, JobStatus
 from app.models.certificate import Certificate, CertificateStatus
 from app.services.certificate_service import run_single_certificate
+from sqlalchemy import select
 
 
 def finalize_job_if_complete(job_id: int) -> None:
     with SessionLocal() as db:
-        job = db.get(GenerationJob, job_id)
+        job = db.scalar(
+            select(GenerationJob).where(GenerationJob.id == job_id).with_for_update()
+        )
 
         if job is None:
             return
 
-        certificates = list(job.certificates)
+        certificate_statuses = db.scalars(
+            select(Certificate.status).where(Certificate.job_id == job_id)
+        ).all()
 
         unfinished_exists = any(
-            certificate.status
-            in {
+            status in {
                 CertificateStatus.PENDING,
                 CertificateStatus.PROCESSING,
             }
-            for certificate in certificates
+            for status in certificate_statuses
         )
 
         if unfinished_exists:
             return
 
         failed_exists = any(
-            certificate.status == CertificateStatus.FAILED
-            for certificate in certificates
+            status == CertificateStatus.FAILED
+            for status in certificate_statuses
         )
 
         job.status = (

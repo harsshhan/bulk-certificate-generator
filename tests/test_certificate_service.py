@@ -121,3 +121,43 @@ def test_run_single_certificate_not_found():
         match="Certificate 999999 not found",
     ):
         run_single_certificate(999999)
+
+def test_run_single_certificate_skips_processing_certificate():
+
+    with SessionLocal() as db:
+        _, certificate = create_test_job(db)
+        certificate_id = certificate.id
+
+        certificate.status = CertificateStatus.PROCESSING
+        db.commit()
+
+    with patch(
+        "app.services.certificate_service.generate_certificate"
+    ) as mock_generate:
+        run_single_certificate(certificate_id)
+
+        mock_generate.assert_not_called()
+
+    with SessionLocal() as db:
+        certificate = db.get(Certificate, certificate_id)
+        assert certificate.status == CertificateStatus.PROCESSING
+
+def test_run_single_certificate_skips_successful_certificate():
+
+    with SessionLocal() as db:
+        _, certificate = create_test_job(db)
+        certificate_id = certificate.id
+
+        certificate.status = CertificateStatus.SUCCESS
+        db.commit()
+
+    with patch(
+        "app.services.certificate_service.generate_certificate"
+    ) as mock_generate:
+        run_single_certificate(certificate_id)
+
+        mock_generate.assert_not_called()
+
+    with SessionLocal() as db:
+        certificate = db.get(Certificate, certificate_id)
+        assert certificate.status == CertificateStatus.SUCCESS

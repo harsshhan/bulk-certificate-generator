@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.models.certificate import Certificate, CertificateStatus
@@ -72,6 +72,34 @@ def run_single_certificate(
         session_factory = SessionLocal
 
     with session_factory() as db:
+
+        result = db.execute(
+            update(Certificate)
+            .where(
+                Certificate.id == certificate_id,
+                Certificate.status == CertificateStatus.PENDING,
+            )
+            .values(status=CertificateStatus.PROCESSING)
+        )
+
+        if result.rowcount == 0:
+            db.rollback()
+
+            certificate = db.get(Certificate, certificate_id)
+            if certificate is None:
+                raise ValueError(
+                    f"Certificate {certificate_id} not found"
+                )
+            
+            logger.info(
+                "Skipping certificate_id=%s because its status is %s",
+                certificate_id,
+                certificate.status,
+            )
+            return
+            
+        db.commit()
+
         certificate = db.get(Certificate, certificate_id)
 
         if certificate is None:

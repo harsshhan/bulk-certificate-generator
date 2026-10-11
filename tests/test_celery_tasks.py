@@ -175,3 +175,26 @@ def test_certificate_task_marks_failed_after_retries_exhausted():
             process_certificate_task.pop_request()
 
     mock_mark_failed.assert_called_once_with(certificate_id)
+
+def test_job_remains_processing_when_certificates_are_unfinished():
+
+    with SessionLocal() as db:
+        job_id, _ = create_test_job(
+            db,
+            [
+                CertificateStatus.SUCCESS,
+                CertificateStatus.PROCESSING,
+            ],
+        )
+
+        job = db.get(GenerationJob, job_id)
+        job.status = JobStatus.PROCESSING
+        db.commit()
+
+    finalize_job_if_complete(job_id)
+
+    with SessionLocal() as db:
+        job = db.get(GenerationJob, job_id)
+
+        assert job.status == JobStatus.PROCESSING
+        assert job.completed_at is None
