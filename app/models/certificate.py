@@ -70,6 +70,16 @@ class Certificate(Base):
         nullable=True
     )
 
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True
+    )
+
+    processing_token: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True
+    )
+
     job: Mapped["GenerationJob"] = relationship(
         back_populates="certificates"
     )

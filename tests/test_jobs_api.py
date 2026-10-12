@@ -1,28 +1,76 @@
+from datetime import date, datetime, timezone
+from unittest.mock import patch
+
 from fastapi.testclient import TestClient
 
 from app.main import app
-
+from app.database import SessionLocal
+from app.models.job import GenerationJob, JobStatus
+from app.models.certificate import Certificate, CertificateStatus
 
 client = TestClient(app)
 
 
-def test_create_job():
+def create_job_payload():
+    return {
+        "event_name": "Python Workshop",
+        "event_date": "2026-10-07",
+        "recipients": [
+            {
+                "name": "Alice Johnson",
+                "email": "alice@example.com",
+            },
+            {
+                "name": "Bob Smith",
+                "email": "bob@example.com",
+            },
+        ],
+    }
+
+
+def create_completed_job():
+    with SessionLocal() as db:
+        job = GenerationJob(
+            event_name="Python Workshop",
+            event_date=date(2026, 10, 7),
+            status=JobStatus.COMPLETED,
+            completed_at=datetime.now(timezone.utc),
+        )
+
+        db.add(job)
+        db.flush()
+
+        certificates = [
+            Certificate(
+                job_id=job.id,
+                recipient_name="Alice Johnson",
+                recipient_email="alice@example.com",
+                status=CertificateStatus.SUCCESS,
+                file_path=f"storage/certificates/{job.id}_alice.pdf",
+                completed_at=datetime.now(timezone.utc),
+            ),
+            Certificate(
+                job_id=job.id,
+                recipient_name="Bob Smith",
+                recipient_email="bob@example.com",
+                status=CertificateStatus.SUCCESS,
+                file_path=f"storage/certificates/{job.id}_bob.pdf",
+                completed_at=datetime.now(timezone.utc),
+            ),
+        ]
+
+        db.add_all(certificates)
+        db.commit()
+        db.refresh(job)
+
+        return job.id
+
+
+@patch("app.api.jobs.process_bulk_job_task.delay")
+def test_create_job(mock_delay):
     response = client.post(
         "/jobs",
-        json={
-            "event_name": "Python Workshop",
-            "event_date": "2026-10-07",
-            "recipients": [
-                {
-                    "name": "Alice Johnson",
-                    "email": "alice@example.com",
-                },
-                {
-                    "name": "Bob Smith",
-                    "email": "bob@example.com",
-                },
-            ],
-        },
+        json=create_job_payload(),
     )
 
     assert response.status_code == 200
@@ -33,26 +81,12 @@ def test_create_job():
     assert data["status"] == "PENDING"
     assert data["total_count"] == 2
 
-def test_get_job_status():
-    create_response = client.post(
-        "/jobs",
-        json={
-            "event_name": "Python Workshop",
-            "event_date": "2026-10-07",
-            "recipients": [
-                {
-                    "name": "Alice Johnson",
-                    "email": "alice@example.com",
-                },
-                {
-                    "name": "Bob Smith",
-                    "email": "bob@example.com",
-                },
-            ],
-        },
-    )
+    mock_delay.assert_called_once_with(data["job_id"])
 
-    job_id = create_response.json()["job_id"]
+
+@patch("app.api.jobs.process_bulk_job_task.delay")
+def test_get_job_status(mock_delay):
+    job_id = create_completed_job()
 
     response = client.get(f"/jobs/{job_id}")
 
@@ -67,32 +101,17 @@ def test_get_job_status():
     assert data["failed_count"] == 0
     assert data["pending_count"] == 0
 
+
 def test_get_nonexistent_job():
     response = client.get("/jobs/999999")
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Job not found"
 
-def test_get_job_certificates():
-    create_response = client.post(
-        "/jobs",
-        json={
-            "event_name": "Python Workshop",
-            "event_date": "2026-10-07",
-            "recipients": [
-                {
-                    "name": "Alice Johnson",
-                    "email": "alice@example.com",
-                },
-                {
-                    "name": "Bob Smith",
-                    "email": "bob@example.com",
-                },
-            ],
-        },
-    )
 
-    job_id = create_response.json()["job_id"]
+@patch("app.api.jobs.process_bulk_job_task.delay")
+def test_get_job_certificates(mock_delay):
+    job_id = create_completed_job()
 
     response = client.get(f"/jobs/{job_id}/certificates")
 

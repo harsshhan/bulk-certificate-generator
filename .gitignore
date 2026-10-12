@@ -22,3 +22,8 @@ storage/certificates/
 
 # IDE
 .vscode/
+
+# Celery Beat runtime files
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
