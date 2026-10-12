@@ -1,11 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from app.worker import celery_app
 from app.database import SessionLocal
 from app.models.job import GenerationJob, JobStatus
 from app.models.certificate import Certificate, CertificateStatus
 from app.services.certificate_service import run_single_certificate
-from sqlalchemy import select
+from sqlalchemy import select, update
+from app.config import settings
 
 
 def finalize_job_if_complete(job_id: int) -> None:
@@ -54,19 +55,31 @@ def mark_certificate_failed(certificate_id: int) -> None:
 
         if certificate is None:
             return
-
-        certificate.status = CertificateStatus.FAILED
-        certificate.error_code = "RETRIES_EXHAUSTED"
-        certificate.error_message = (
-            "Certificate generation failed after exhausting retries"
-        )
-        certificate.completed_at = datetime.now(timezone.utc)
-
         job_id = certificate.job_id
 
+        result = db.execute(
+            update(Certificate)
+            .where(
+                Certificate.id == certificate_id,
+                Certificate.status == CertificateStatus.PENDING,
+                Certificate.processing_token.is_(None),
+                Certificate.error_code == "GENERATION_ERROR",
+            )
+            .values(
+                status=CertificateStatus.FAILED,
+                error_code="RETRIES_EXHAUSTED",
+                error_message=(
+                    "Certificate generation failed after exhausting retries"
+                ),
+                completed_at=datetime.now(timezone.utc),
+                processing_started_at=None,
+                processing_token=None,
+            )
+        )
         db.commit()
 
-    finalize_job_if_complete(job_id)
+    if result.rowcount == 1:
+        finalize_job_if_complete(job_id)
 
 
 @celery_app.task(
@@ -127,3 +140,45 @@ def process_certificate_task(self, certificate_id: int) -> None:
             job_id = certificate.job_id
 
         finalize_job_if_complete(job_id)
+
+@celery_app.task(
+    name="certificates.recover_stale_certificates",
+)
+def recover_stale_certificates() -> int:
+    cutoff_time = datetime.now(timezone.utc) - timedelta(
+        seconds=settings.certificate_processing_timeout_seconds
+    )
+
+    recovered_certificate_ids: list[int] = []
+
+    with SessionLocal() as db:
+        stale_certificates = db.scalars(
+            select(Certificate)
+            .where(
+                Certificate.status == CertificateStatus.PROCESSING,
+                Certificate.processing_started_at.is_not(None),
+                Certificate.processing_started_at < cutoff_time,
+                Certificate.processing_token.is_not(None),
+            )
+            .with_for_update(skip_locked=True)
+        ).all()
+
+        for certificate in stale_certificates:
+            certificate.status = CertificateStatus.PENDING
+            certificate.processing_started_at = None
+            certificate.processing_token = None
+            certificate.file_path = None
+            certificate.error_code = "PROCESSING_TIMEOUT"
+            certificate.error_message = (
+                "Certificate processing timed out and will be retried"
+            )
+            certificate.completed_at = None
+
+            recovered_certificate_ids.append(certificate.id)
+
+        db.commit()
+
+    for certificate_id in recovered_certificate_ids:
+        process_certificate_task.delay(certificate_id)
+
+    return len(recovered_certificate_ids)

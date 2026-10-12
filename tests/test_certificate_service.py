@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +39,9 @@ def create_test_job(db):
 def test_process_certificate_success():
     with SessionLocal() as db:
         job, certificate = create_test_job(db)
+        certificate.status = CertificateStatus.PROCESSING
+        certificate.processing_token = "test-token-123"
+        db.commit()
 
         with patch(
             "app.services.certificate_service.generate_certificate"
@@ -48,6 +51,7 @@ def test_process_certificate_success():
                 db=db,
                 event_name=job.event_name,
                 event_date=job.event_date.isoformat(),
+                processing_token="test-token-123",
             )
 
             mock_generate.assert_called_once()
@@ -60,10 +64,16 @@ def test_process_certificate_success():
         assert certificate.error_message is None
         assert certificate.completed_at is not None
 
+        assert certificate.processing_started_at is None
+        assert certificate.processing_token is None
+
 
 def test_process_certificate_failure_is_retryable():
     with SessionLocal() as db:
         job, certificate = create_test_job(db)
+        certificate.status = CertificateStatus.PROCESSING
+        certificate.processing_token = "test-token-123"
+        db.commit()
 
         with patch(
             "app.services.certificate_service.generate_certificate",
@@ -78,6 +88,7 @@ def test_process_certificate_failure_is_retryable():
                     db=db,
                     event_name=job.event_name,
                     event_date=job.event_date.isoformat(),
+                    processing_token="test-token-123",
                 )
 
             mock_generate.assert_called_once()
@@ -92,6 +103,8 @@ def test_process_certificate_failure_is_retryable():
             == "Certificate generation attempt failed"
         )
         assert certificate.completed_at is None
+        assert certificate.processing_started_at is None
+        assert certificate.processing_token is None
 
 
 def test_run_single_certificate():
@@ -113,6 +126,8 @@ def test_run_single_certificate():
         assert certificate.status == CertificateStatus.SUCCESS
         assert certificate.file_path is not None
         assert certificate.completed_at is not None
+        assert certificate.processing_started_at is None
+        assert certificate.processing_token is None
 
 
 def test_run_single_certificate_not_found():
@@ -122,8 +137,8 @@ def test_run_single_certificate_not_found():
     ):
         run_single_certificate(999999)
 
-def test_run_single_certificate_skips_processing_certificate():
 
+def test_run_single_certificate_skips_processing_certificate():
     with SessionLocal() as db:
         _, certificate = create_test_job(db)
         certificate_id = certificate.id
@@ -140,10 +155,12 @@ def test_run_single_certificate_skips_processing_certificate():
 
     with SessionLocal() as db:
         certificate = db.get(Certificate, certificate_id)
+
+        assert certificate is not None
         assert certificate.status == CertificateStatus.PROCESSING
 
-def test_run_single_certificate_skips_successful_certificate():
 
+def test_run_single_certificate_skips_successful_certificate():
     with SessionLocal() as db:
         _, certificate = create_test_job(db)
         certificate_id = certificate.id
@@ -160,4 +177,36 @@ def test_run_single_certificate_skips_successful_certificate():
 
     with SessionLocal() as db:
         certificate = db.get(Certificate, certificate_id)
+
+        assert certificate is not None
         assert certificate.status == CertificateStatus.SUCCESS
+
+def test_stale_worker_cannot_overwrite_newer_attempt():
+    with SessionLocal() as db:
+        _, certificate = create_test_job(db)
+        certificate_id = certificate.id
+
+        certificate.status = CertificateStatus.PROCESSING
+        certificate.processing_token = "new-attempt-token"
+        certificate.processing_started_at = datetime.now(timezone.utc)
+        db.commit()
+
+    with SessionLocal() as db:
+        with patch(
+            "app.services.certificate_service.generate_certificate"
+        ) as mock_generate:
+            process_certificate(
+                certificate_id=certificate_id,
+                db=db,
+                event_name="Test Event",
+                event_date="2026-10-11",
+                processing_token="old-attempt-token",
+            )
+
+            mock_generate.assert_not_called()
+
+    with SessionLocal() as db:
+        certificate = db.get(Certificate, certificate_id)
+
+        assert certificate.status == CertificateStatus.PROCESSING
+        assert certificate.processing_token == "new-attempt-token"

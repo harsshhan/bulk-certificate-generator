@@ -1,7 +1,9 @@
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import call, patch
+
 import pytest
 
+from app.config import settings
 from app.database import SessionLocal
 from app.models.certificate import Certificate, CertificateStatus
 from app.models.job import GenerationJob, JobStatus
@@ -9,14 +11,11 @@ from app.tasks.certificate_tasks import (
     finalize_job_if_complete,
     process_bulk_job_task,
     process_certificate_task,
+    recover_stale_certificates,
 )
 
 
-def create_test_job(
-    db,
-    certificate_statuses=None,
-):
-
+def create_test_job(db, certificate_statuses=None):
     if certificate_statuses is None:
         certificate_statuses = [
             CertificateStatus.PENDING,
@@ -51,7 +50,6 @@ def create_test_job(
 
 
 def test_bulk_job_schedules_individual_certificate_tasks():
-
     with SessionLocal() as db:
         job_id, certificate_ids = create_test_job(db)
 
@@ -71,7 +69,6 @@ def test_bulk_job_schedules_individual_certificate_tasks():
 
 
 def test_bulk_job_does_not_schedule_tasks_when_job_is_missing():
-
     with patch(
         "app.tasks.certificate_tasks.process_certificate_task.delay"
     ) as mock_delay:
@@ -81,9 +78,8 @@ def test_bulk_job_does_not_schedule_tasks_when_job_is_missing():
 
 
 def test_job_completes_when_all_certificates_succeed():
-
     with SessionLocal() as db:
-        job_id, certificate_ids = create_test_job(
+        job_id, _ = create_test_job(
             db,
             [
                 CertificateStatus.SUCCESS,
@@ -101,9 +97,8 @@ def test_job_completes_when_all_certificates_succeed():
 
 
 def test_job_completes_with_errors_when_certificate_fails():
-
     with SessionLocal() as db:
-        job_id, certificate_ids = create_test_job(
+        job_id, _ = create_test_job(
             db,
             [
                 CertificateStatus.SUCCESS,
@@ -119,10 +114,10 @@ def test_job_completes_with_errors_when_certificate_fails():
         assert job.status == JobStatus.COMPLETED_WITH_ERRORS
         assert job.completed_at is not None
 
-def test_certificate_task_retries_on_failure():
 
+def test_certificate_task_retries_on_failure():
     with SessionLocal() as db:
-        job_id, certificate_ids = create_test_job(db)
+        _, certificate_ids = create_test_job(db)
 
     certificate_id = certificate_ids[0]
 
@@ -145,8 +140,8 @@ def test_certificate_task_retries_on_failure():
 
     mock_retry.assert_called_once()
 
-def test_certificate_task_marks_failed_after_retries_exhausted():
 
+def test_certificate_task_marks_failed_after_retries_exhausted():
     with SessionLocal() as db:
         _, certificate_ids = create_test_job(db)
 
@@ -176,8 +171,8 @@ def test_certificate_task_marks_failed_after_retries_exhausted():
 
     mock_mark_failed.assert_called_once_with(certificate_id)
 
-def test_job_remains_processing_when_certificates_are_unfinished():
 
+def test_job_remains_processing_when_certificates_are_unfinished():
     with SessionLocal() as db:
         job_id, _ = create_test_job(
             db,
@@ -198,3 +193,94 @@ def test_job_remains_processing_when_certificates_are_unfinished():
 
         assert job.status == JobStatus.PROCESSING
         assert job.completed_at is None
+
+
+def test_recovers_stale_processing_certificate():
+    stale_time = datetime.now(timezone.utc) - timedelta(
+        seconds=settings.certificate_processing_timeout_seconds + 60
+    )
+
+    with SessionLocal() as db:
+        job_id, certificate_ids = create_test_job(
+            db,
+            [CertificateStatus.PROCESSING],
+        )
+
+        certificate = db.get(Certificate, certificate_ids[0])
+        certificate.processing_started_at = stale_time
+        certificate.processing_token = "stale-token-123"
+        db.commit()
+
+    with patch(
+        "app.tasks.certificate_tasks.process_certificate_task.delay"
+    ) as mock_delay:
+        recovered_count = recover_stale_certificates.run()
+
+    assert recovered_count == 1
+    mock_delay.assert_called_once_with(certificate_ids[0])
+
+    with SessionLocal() as db:
+        certificate = db.get(Certificate, certificate_ids[0])
+
+        assert certificate.status == CertificateStatus.PENDING
+        assert certificate.processing_started_at is None
+        assert certificate.processing_token is None
+        assert certificate.error_code == "PROCESSING_TIMEOUT"
+        assert certificate.file_path is None
+        assert certificate.completed_at is None
+
+
+def test_does_not_recover_recently_processing_certificate():
+    recent_time = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+    with SessionLocal() as db:
+        _, certificate_ids = create_test_job(
+            db,
+            [CertificateStatus.PROCESSING],
+        )
+
+        certificate = db.get(Certificate, certificate_ids[0])
+        certificate.processing_started_at = recent_time
+        certificate.processing_token = "active-token-123"
+        db.commit()
+
+    with patch(
+        "app.tasks.certificate_tasks.process_certificate_task.delay"
+    ) as mock_delay:
+        recovered_count = recover_stale_certificates.run()
+
+    assert recovered_count == 0
+    mock_delay.assert_not_called()
+
+    with SessionLocal() as db:
+        certificate = db.get(Certificate, certificate_ids[0])
+
+        assert certificate.status == CertificateStatus.PROCESSING
+        assert certificate.processing_token == "active-token-123"
+
+
+def test_does_not_recover_processing_certificate_without_timestamp():
+    with SessionLocal() as db:
+        _, certificate_ids = create_test_job(
+            db,
+            [CertificateStatus.PROCESSING],
+        )
+
+        certificate = db.get(Certificate, certificate_ids[0])
+        certificate.processing_started_at = None
+        certificate.processing_token = "active-token-123"
+        db.commit()
+
+    with patch(
+        "app.tasks.certificate_tasks.process_certificate_task.delay"
+    ) as mock_delay:
+        recovered_count = recover_stale_certificates.run()
+
+    assert recovered_count == 0
+    mock_delay.assert_not_called()
+
+    with SessionLocal() as db:
+        certificate = db.get(Certificate, certificate_ids[0])
+
+        assert certificate.status == CertificateStatus.PROCESSING
+        assert certificate.processing_token == "active-token-123"
